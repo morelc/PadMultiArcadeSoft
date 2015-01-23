@@ -31,6 +31,7 @@
 #define NUM_PIN_PREVIOUS_PROFIL A15
 #define NUM_FIRST_PIN_COMPONENTS_A 22
 #define NUM_FIRST_PIN_COMPONENTS_B 30
+#define NUM_PIN_OO_SNES_COMPONENT A12
 #define NUM_FIRST_PIN_SDCARD 50
 
 #define ARRAY_CORRESP_ID_MACHINE {"NES","SNES","ATARI 2600"}
@@ -63,6 +64,33 @@ public:
     hasNext = false;
     nextAssoc = NULL;
   }
+
+  void signalGeneration(int* currentSignalToSend, int* currentCmpSignalForAutofire, int* autofireTimer, int* autofireActivated, int btnNum)
+  {
+    if(isAutofire)
+    {
+      if(*autofireActivated & (1 << btnNum))
+      {
+        *autofireActivated = *autofireActivated & ~(1 << btnNum);
+      }
+      else
+      {
+        *autofireActivated = *autofireActivated | (1 << btnNum);
+        if(*autofireTimer > timer)
+          *autofireTimer = timer;
+        *currentCmpSignalForAutofire = *currentCmpSignalForAutofire | signalToSend;
+      }
+    }
+    if(hasNext)
+    {
+      sendMacro(); 
+    }
+    else
+    {
+      *currentSignalToSend = *currentSignalToSend | signalToSend;
+    }
+  }
+
   BtnAssoc* clone()
   {
     BtnAssoc* newBtnAssoc = new BtnAssoc();
@@ -88,6 +116,12 @@ public:
     else
       Serial.print(" ||");
   }
+
+private:
+  void sendMacro() // à définir
+  {
+    Serial.println("sendMacro à definir...");
+  }
 };
 
 /*------------------------------ CLASSE Profil  et dérivés ------------------------------*/
@@ -105,8 +139,33 @@ public:
       assocs[i] = new BtnAssoc();
   }
 
-  void sendSignal();
+  void sendSignal(int btnPressed, int* lastBtnPressed, int* autofireActivated)
+  {
+    int signalToSend = 0;
+    int complementarySignalForAutofire = 0;
+    int autofireTimer = 5000;
+    for(int i = 0; i < 12; i++)
+    {
+      if (btnPressed & ( 1 << (13 - i)))
+        assocs[i]->signalGeneration(&signalToSend, &complementarySignalForAutofire, &autofireTimer, autofireActivated, i);
+    }
+    sendInstantSignal(signalToSend);
+    if(complementarySignalForAutofire)
+    {
+      sendAutofireSignal(signalToSend, complementarySignalForAutofire, autofireTimer);
+      *lastBtnPressed = 0;
+    }
+  }
+
   void initPins() {  
+    {
+      for(int i = 0; i < 8; i++)
+      {
+        pinMode(NUM_FIRST_PIN_COMPONENTS_A+i, OUTPUT);
+        pinMode(NUM_FIRST_PIN_COMPONENTS_B+i, OUTPUT);
+      }
+      pinMode(NUM_PIN_OO_SNES_COMPONENT, INPUT);
+    }
   };
 
   Profil* clone()
@@ -119,11 +178,11 @@ public:
     return newProfil;
   }
 
-  void displayOnLCDScreen() // à définir au niveau lcd
+  void stringForLCDScreen(char* line1, char* line2) // remplace displayOnLCDScreen()
   {
-    char* machineNanes[] = ARRAY_CORRESP_ID_MACHINE;
-    Serial.println(name);
-    Serial.println(machineNanes[idMachine]);
+    char machineNanes [][17] = ARRAY_CORRESP_ID_MACHINE;
+    strncpy(line1, name, sizeof(name));
+    strncpy(line2, machineNanes[idMachine], sizeof(machineNanes[idMachine]));
   }
 
   void serialPrint() {
@@ -138,12 +197,20 @@ public:
   }
 
 private:
-  void sendInstantSignal(); // à définir
-  void sendAutofireSignal(); // à définir
-  void sendMacro(); // à définir
+  void sendInstantSignal(int signalToSend) // à définir
+  {
+    Serial.println(signalToSend);
+    Serial.println("send instant siganl à definir");
+  }
+  void sendAutofireSignal(int signalSend, int complementarySignalForAutofire, int autofireTimer)
+  {
+    delay(autofireTimer);
+    sendInstantSignal(signalSend & ~complementarySignalForAutofire);
+  }
 };
 
-class SNESProfil : Profil
+class SNESProfil : 
+Profil
 {
   void sendSignal();
   void initPins()
@@ -152,7 +219,9 @@ class SNESProfil : Profil
     {
       pinMode(NUM_FIRST_PIN_COMPONENTS_A+i, OUTPUT);
       pinMode(NUM_FIRST_PIN_COMPONENTS_B+i, OUTPUT);
-    }  
+    }
+    pinMode(NUM_PIN_OO_SNES_COMPONENT, OUTPUT);
+    digitalWrite(NUM_PIN_OO_SNES_COMPONENT, HIGH);
   }
 };
 /*------------------------------ CLASSE BtnAssocBuilder ------------------------------*/
@@ -271,6 +340,7 @@ public:
   {
     currentProfile = 0;
     lastBtnPressed = 0;
+    autofireActivated = 0;
     nbOfProfils = 1;
     for(int i = 0; i < MAX_PROFILS_IN_PAD; i++)
       profils[i] = new Profil();
@@ -278,19 +348,10 @@ public:
   void nextProfil()
   {
     currentProfile = (currentProfile + 1)%nbOfProfils;
-    startProfil();
   }
   void previousProfil()
   {
     currentProfile = (currentProfile - 1 + nbOfProfils)%nbOfProfils;
-    startProfil();
-  }
-  void startProfil()
-  {
-    Serial.print("Profil actuel: ");
-    Serial.println(currentProfile);
-    profils[currentProfile]->displayOnLCDScreen();
-    profils[currentProfile]->initPins();
   }
   Profil* getCurrentProfil()
   {
@@ -299,37 +360,50 @@ public:
   void loadProfilsFromSDCard()// à définir
   {
     // note: nom du fichier = PROFILS_FILE_NAME
-    nbOfProfils = 2;
+    nbOfProfils = 1;
     BtnAssocBuilder *bab;
     ProfilBuilder *pb;
     bab = new BtnAssocBuilder();
     pb = new ProfilBuilder();
-    pb->setProfilName("cool");
+    /*pb->setProfilName("cool");
+     pb->setMachine(1);
+     bab->setSignalToSend(10);
+     bab->createNext();
+     bab->setSignalToSend(5);
+     bab->setTimer(25);
+     pb->setAssoc(1, bab->getBtnAssoc()); 
+     bab->setTimer(80);
+     bab->activateAutofire();
+     bab->setSignalToSend(7);
+     pb->setAssoc(5, bab->getBtnAssoc());
+     profils[0] = pb->getProfil();
+     pb->setProfilName("cool bis");
+     pb->setMachine(2);
+     bab->setSignalToSend(5);
+     bab->createNext();
+     bab->setSignalToSend(2);
+     pb->setAssoc(9, bab->getBtnAssoc());
+     bab->activateAutofire();
+     bab->setTimer(2);
+     bab->setSignalToSend(21);
+     pb->setAssoc(6, bab->getBtnAssoc());
+     profils[1] = pb->getProfil();*/
+    pb->setProfilName("Profil de test");
     pb->setMachine(1);
+    bab->setSignalToSend(1);
+    pb->setAssoc(0, bab->getBtnAssoc()); 
     bab->setSignalToSend(10);
-    bab->createNext();
-    bab->setSignalToSend(5);
-    bab->setTimer(25);
-    pb->setAssoc(1, bab->getBtnAssoc()); 
+    pb->setAssoc(1, bab->getBtnAssoc());
+    bab->setSignalToSend(100);
+    pb->setAssoc(2, bab->getBtnAssoc()); 
     bab->setTimer(80);
     bab->activateAutofire();
-    bab->setSignalToSend(7);
-    pb->setAssoc(5, bab->getBtnAssoc());
+    bab->setSignalToSend(1000);
+    pb->setAssoc(3, bab->getBtnAssoc());
     profils[0] = pb->getProfil();
-    pb->setProfilName("cool bis");
-    pb->setMachine(2);
-    bab->setSignalToSend(5);
-    bab->createNext();
-    bab->setSignalToSend(2);
-    pb->setAssoc(9, bab->getBtnAssoc());
-    bab->activateAutofire();
-    bab->setTimer(2);
-    bab->setSignalToSend(21);
-    pb->setAssoc(6, bab->getBtnAssoc());
-    profils[1] = pb->getProfil();
   }
 
-  void autoselectProfile(); // à définir, doit lire l'EPROM  afin de trouver l'id du dernier profil sélectionné, copie le num dans currentProfile et appel startProfil(). Si num > au nombre de profils alors on 
+  void autoselectProfile(); // à définir, doit lire l'EPROM  afin de trouver l'id du dernier profil sélectionné, copie le num dans currentProfile et appel profils[currentProfile]->initPins(). Si num > au nombre de profils alors on 
 };
 
 /*------------------------------ CLASSE IHM ------------------------------*/
@@ -406,17 +480,36 @@ void loop() {
 /*------------------------------ Définition des fonctions permettant les tests ------------------------------*/
 void terminal()
 {
-  char cmd[2];
-  Serial.readBytes(cmd, 1);
-  nettoyerCommande((char*) &cmd);
+  char cmd[2]; 
+  char lineA[17], lineB[17];
+  strncpy(cmd,"",sizeof(cmd));
+
+  do
+  {
+    Serial.readBytes(cmd, 1);
+    nettoyerCommande((char*) &cmd);
+  } 
+  while(strcmp(cmd, "") == 0);    
+
   if (strcmp(cmd, "+") == 0)
     padDatas->nextProfil();
   if (strcmp(cmd, "-") == 0)
     padDatas->previousProfil();
   if(strcmp(cmd, "g") == 0)
     padDatas->getCurrentProfil()->serialPrint();
-  if(strcmp(cmd, "p") == 0)
-    padDatas->getCurrentProfil()->displayOnLCDScreen();
+  if(strcmp(cmd, "a") == 0)
+  {
+    padDatas->getCurrentProfil()->stringForLCDScreen(lineA, lineB);
+    Serial.println("Console:");
+    Serial.println(lineA);
+    Serial.println(lineB);
+  }
+  if(strcmp(cmd, "s") == 0)
+  {
+    Serial.println("Envoi du signal");
+    padDatas->getCurrentProfil()->sendSignal(16383, &padDatas->lastBtnPressed, &padDatas->autofireActivated);
+    padDatas->lastBtnPressed = 16383;
+  }
 }
 
 void nettoyerCommande(char* commandeANettoyer) {
@@ -424,15 +517,3 @@ void nettoyerCommande(char* commandeANettoyer) {
   if ((pos = strchr(commandeANettoyer, '\n')) != NULL)
     *pos = '\0';
 }
-
-
-
-
-
-
-
-
-
-
-
-
